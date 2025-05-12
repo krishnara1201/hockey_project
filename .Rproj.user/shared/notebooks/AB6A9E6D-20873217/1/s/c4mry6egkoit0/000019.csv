@@ -1,0 +1,1 @@
+"0","text(x=1:length(std_residuals), y=std_residuals, labels=ifelse(std_residuals > 3, rownames(dtrain), """"), col=""red"")"

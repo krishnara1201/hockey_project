@@ -1,0 +1,8 @@
+"0",""
+"0","# Identify influential points"
+"0","influential <- which(cooksd > 4/600)"
+"0",""
+"0","# residuals"
+"0","# Calculate standardized residuals"
+"0","std_residuals <- rstandard(newer_model)"
+"0","plot(std_residuals)"

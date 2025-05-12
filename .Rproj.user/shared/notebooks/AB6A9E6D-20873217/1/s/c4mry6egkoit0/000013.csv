@@ -1,0 +1,1 @@
+"0","text(x=1:length(cooksd), y=cooksd, labels=ifelse(cooksd > 4/600, rownames(dtrain), """"), col=""red"")"

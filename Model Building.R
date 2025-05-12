@@ -1,0 +1,811 @@
+library(gbm)
+library(lubridate)
+library(tidyverse)
+library(rpart)
+library(caret)
+library(randomForest)
+library(missForest)
+library(xgboost)
+
+load("final.RData")
+
+formula = "salary~date + cap + gp + injure + toi+ pts+ goal + 
+pos + nat + takeaway + giveaway + relCorsi + pim + hits + pm "
+
+# # Data exploration
+# cor_matrix <- cor(dtrain[, c("salary", "gp", "pts", "toi", "relCorsi",
+#                              "cap", "injure", "age", "takeaway", "giveaway")])
+# corrplot::corrplot(cor_matrix)
+# plot(dtrain$gp, dtrain$salary)
+# 
+# pairs(dtrain[, c("salary", "gp", "pts", "toi", "relCorsi",
+#                  "cap", "injure", "age", "takeaway", "giveaway")])
+# 
+# 
+# hist(dtrain$salary)
+# boxplot(dtrain$salary)
+# 
+# hist(log(dtrain$salary))
+# 
+# boxplot(dtrain$salary, dtrain$pos)
+# plot(dtrain$cap, dtrain$team)
+
+# Sample dataset with a date column
+
+# Convert the 'date' column to Date format
+dtrain$date <- as.Date(dtrain$date)
+
+# Extract date features
+dtrain$year <- year(dtrain$date)
+dtrain$month <- month(dtrain$date)
+dtrain$day <- day(dtrain$date)
+dtrain$day_of_week <- as.factor(wday(dtrain$date, label = FALSE)) # Sunday = 1, Saturday = 7
+dtrain$is_weekend <- as.factor(ifelse(dtrain$day_of_week %in% c(1, 7), 1, 0)) # Weekend flag
+
+# Cyclic encoding for month (to capture periodicity)
+dtrain$month_sin <- sin(2 * pi * dtrain$month / 12)
+dtrain$month_cos <- cos(2 * pi * dtrain$month / 12)
+
+# Drop the original date column (not used directly in GBM)
+dtrain$date <- NULL
+dtrain$month <- NULL
+dtrain$day_of_week <- NULL
+
+# Convert all character columns to factors
+dtrain <- dtrain %>%
+  mutate(across(where(is.character), as.factor))
+
+# Creating new features
+dtrain$npc <- dtrain$takeaway - dtrain$giveaway
+dtrain$pm_per_min <- dtrain$pm/dtrain$toi
+dtrain$ppg <- dtrain$pts/dtrain$gp
+
+dtrain$takeaway <- NULL 
+dtrain$giveaway <- NULL
+dtrain$pm <- NULL
+dtrain$pts <- NULL
+dtrain$goal <- NULL
+
+# Checking multi-collinearity
+# test_model <- lm(salary~., data = dtrain)
+# car::vif(test_model)
+
+newer_model <- lm(salary~team+gp+injure+toi+pos+nat+age+
+                    relCorsi+pim+hits+day+
+                    is_weekend+month_sin+month_cos+npc+
+                    pm_per_min+ppg, 
+                  data = dtrain)
+car::vif(newer_model)
+
+# Looking and outliers and influential points
+
+# Calculate Cook's Distance
+cooksd <- cooks.distance(newer_model)
+
+# Plot Cook's Distance
+plot(cooksd, pch="*", cex=2, main="Influential Observations by Cook's Distance")
+abline(h = 4/600, col="red") # Add cutoff line (threshold: 4/n)
+text(x=1:length(cooksd), y=cooksd, labels=ifelse(cooksd > 4/600, rownames(dtrain), ""), col="red")
+
+# Identify influential points
+influential <- which(cooksd > 4/600)
+
+# residuals
+# Calculate standardized residuals
+std_residuals <- rstandard(newer_model)
+plot(std_residuals)
+abline(h = c(-3,3), col="red") # Add cutoff line (threshold: 4/n)
+text(x=1:length(std_residuals), y=std_residuals, labels=ifelse(std_residuals > 3, rownames(dtrain), ""), col="red")
+# Identify outliers with standardized residuals > ±3
+outliers <- which(abs(std_residuals) > 3)
+
+# Removing outliers
+dtrain <- dtrain[-outliers,]
+
+formula_full <- "log(salary)~team+gp+injure+toi+pos+nat+age+
+                    relCorsi+pim+hits+day+
+                    is_weekend+month_sin+month_cos+npc+
+                    pm_per_min+ppg"
+
+
+## GBM Models
+# Building a Gradient boosted Model
+
+# # Cross validation on shrinkage
+# M <- 500
+# k <- 5
+# set.seed(31853071)
+# # Shrinkage parameter values
+# alphas <- c(0.005, 0.01, 0.02, 0.03, 0.04,
+#             0.05, 0.06, 0.07, 0.08, 0.09,
+#             0.10, 0.20, 0.30, 0.40, 0.50,
+#             0.60, 0.70, 0.80, 0.90, 1)
+# n_alphas <- length(alphas)
+# cverror <- numeric(length = n_alphas)
+# Mvals <- numeric(length = n_alphas)
+# fit <- list(length = n_alphas)
+# for (i in 1:n_alphas) {
+#   fit[[i]] <- model.boost.shrink <- gbm(as.formula(formula_full),
+#                                      data=dtrain,
+#                                      distribution = "gaussian",
+#                                      shrinkage = alphas[i],
+#                                      n.trees = M,
+#                                      bag.fraction = 1,
+#                                      cv.folds = k,
+#                                      interaction.depth = 2
+#   )
+#   cverror[i] <- min(fit[[i]]$cv.error)
+#   Mvals[i] <- which.min(fit[[i]]$cv.error)
+# }
+# plot(alphas, cverror, type = "b",
+#      col = adjustcolor("firebrick", 0.7), pch=19, lwd=2,
+#      main = "cross-validated error", xlab = "shrinkage", ylab="cv.error")
+# i <- which.min(cverror)
+# alpha <- alphas[i]
+# summary(fit[[i]])
+# 
+# 
+# # Tree parameter values
+# Ms <- c(100, 200, 300, 400, 500, 600, 700, 800, 900, 1000)
+# n_Ms <- length(Ms)
+# cverror <- numeric(length = n_Ms)
+# fit <- list(length = n_Ms)
+# for (i in 1:n_Ms) {
+#   fit[[i]] <- model.boost.trees <- gbm(as.formula(formula_full),
+#                                        data=dtrain,
+#                                      distribution = "gaussian",
+#                                      shrinkage = alpha,
+#                                      n.trees = Ms[i],
+#                                      bag.fraction = 1,
+#                                      cv.folds = k,
+#                                      interaction.depth = 2
+#   )
+#   cverror[i] <- min(fit[[i]]$cv.error)
+# }
+# 
+# plot(Ms, cverror, type = "b",
+#      col = adjustcolor("firebrick", 0.7), pch=19, lwd=2,
+#      main = "cross-validated error", xlab = "Number of trees", ylab="cv.error")
+# i <- which.min(cverror)
+# M <- Ms[i]
+# summary(fit[[i]])
+# 
+# # Bag fractions parameter values
+# bag.fracs <- c(0.05, 0.10, 0.20, 0.30, 0.40, 0.50,
+#                0.60, 0.70, 0.80, 0.90, 1)
+# 
+# n_bag.fracs <- length(bag.fracs)
+# cverror <- numeric(length = n_bag.fracs)
+# fit <- list(length = n_bag.fracs)
+# for (i in 1:n_bag.fracs) {
+#   fit[[i]] <- model.boost.trees <- gbm(as.formula(formula_full),
+#                                        data=dtrain,
+#                                        distribution = "gaussian",
+#                                        shrinkage = alpha,
+#                                        n.trees = M,
+#                                        bag.fraction = bag.fracs[i],
+#                                        cv.folds = k,
+#                                        interaction.depth = 2
+#   )
+#   cverror[i] <- min(fit[[i]]$cv.error)
+# }
+# plot(bag.fracs, cverror, type = "b",
+#      col = adjustcolor("firebrick", 0.7), pch=19, lwd=2,
+#      main = "cross-validated error", xlab = "bag fraction", ylab="cv.error")
+# i <- which.min(cverror)
+# bag.fraction <- bag.fracs[i]
+# summary(fit[[i]])
+# 
+# feature_sets <- list(
+#   top3 = c("toi", "ppg", "gp"),
+#   top5 = c("toi", "ppg", "gp", "nat", "pim"),
+#   top7 = c("toi", "ppg", "gp", "nat", "pim", "team", "pm_per_min"),
+#   top9 = c("toi", "ppg", "gp", "nat", "pim", "team", "pm_per_min", "hits", "age"),
+#   all =  c("team","gp","injure","toi","pos","nat","age",
+#            "relCorsi","pim","hits","day","day_of_week",
+#            "is_weekend","month_sin","month_cos","npc","pm_per_min","ppg")
+# )
+# 
+# n_features <- length(feature_sets)
+# cverror <- numeric(length = n_features)
+# fit <- list(length = n_features)
+# for (i in 1:n_features) {
+#   features <- feature_sets[[i]]
+#   formula <- as.formula(paste("log(salary) ~", paste(features, collapse = " + ")))
+#   fit[[i]] <- model.boost.trees <- gbm(formula,
+#                                        data=dtrain,
+#                                        distribution = "gaussian",
+#                                        shrinkage = alpha,
+#                                        n.trees = M,
+#                                        bag.fraction = bag.fraction,
+#                                        cv.folds = k,
+#                                        interaction.depth = 2
+#   )
+#   cverror[i] <- min(fit[[i]]$cv.error)
+# }
+# 
+# plot(c(3,5,7,9,18), cverror, type = "b",
+#      col = adjustcolor("firebrick", 0.7), pch=19, lwd=2,
+#      main = "cross-validated error", xlab = "Number of features", ylab="cv.error")
+# 
+# i <- which.min(cverror)
+
+# # Gradient Boosted Model
+# gbm.final <- fit[[i]]
+# summary(gbm.final)
+
+
+# Convert the 'date' column to Date format
+dtest$date <- as.Date(dtest$date)
+
+# Extract date features
+dtest$year <- year(dtest$date)
+dtest$month <- month(dtest$date)
+dtest$day <- day(dtest$date)
+dtest$day_of_week <- as.factor(wday(dtest$date, label = FALSE)) # Sunday = 1, Saturday = 7
+dtest$is_weekend <- as.factor(ifelse(dtest$day_of_week %in% c(1, 7), 1, 0)) # Weekend flag
+
+# Cyclic encoding for month (to capture periodicity)
+dtest$month_sin <- sin(2 * pi * dtest$month / 12)
+dtest$month_cos <- cos(2 * pi * dtest$month / 12)
+
+# Drop the original date column (not used directly in GBM)
+dtest$date <- NULL
+dtest$month <- NULL
+
+# Convert all character columns to factors
+dtest <- dtest %>%
+  mutate(across(where(is.character), as.factor))
+
+# Creating new features
+dtest$npc <- dtest$takeaway - dtest$giveaway
+dtest$pm_per_min <- dtest$pm/dtest$toi
+dtest$ppg <- dtest$pts/dtest$gp
+
+dtest$takeaway <- NULL 
+dtest$giveaway <- NULL
+dtest$pm <- NULL
+dtest$pts <- NULL
+dtest$goal <- NULL
+dtest$day_of_week <- NULL
+
+dtest$salary <- 1
+# dtest$salary <- exp(predict(gbm.final, dtest))
+# 
+# submission <- select(dtest, c(Id, salary))
+# write.csv(submission, "sub_gbm_init.csv",row.names = FALSE)
+
+
+# ## Random Forest Model
+# 
+# 
+# model.rf <- randomForest(as.formula(formula_full),
+#                       data = dtrain,
+#                       # Number of variates to select at each step
+#                       importance = TRUE)
+# 
+# # Need separate response and explanatory variate data frames
+# trainy <- dtrain[, "salary"]
+# trainx <- select(dtrain, c("team","gp","injure","toi","pos","nat","age",
+#                            "relCorsi","pim","hits","day","day_of_week",
+#                            "is_weekend","month_sin","month_cos","npc","pm_per_min","ppg"))
+# 
+# # 10 fold cross-validataion
+# model.rfcv <- rfcv(trainx = trainx, trainy = log(trainy), cv.fold = 10)
+# # We can plot the results
+# with(model.rfcv, plot(n.var, error.cv, pch = 19, type="b", col="blue"))
+# nfeat = as.integer(names(which.min(model.rfcv$error.cv)))
+# 
+# model.imp <- importance(model.rf)
+# model.feat <- rownames(model.imp)[1:nfeat]
+# 
+# rf_formula <- as.formula(paste("log(salary) ~", 
+#                                paste(model.feat, collapse = " + ")))
+# 
+# model.rf.2 <- randomForest(rf_formula,
+#                            data = dtrain,
+#                            importance = TRUE)
+# 
+# # Need separate response and explanatory variate data frames
+# trainy <- dtrain[, "salary"]
+# trainx <- select(dtrain, all_of(model.feat))
+# 
+# # 10 fold cross-validataion
+# model.rfcv2 <- rfcv(trainx = trainx, trainy = log(trainy), cv.fold = 10)
+# # We can plot the results
+# with(model.rfcv2, plot(n.var, error.cv, pch = 19, type="b", col="blue"))
+# 
+# nfeat2 = as.integer(names(which.min(model.rfcv2$error.cv)))
+# 
+# model.imp2 <- importance(model.rf.2)
+# model.feat2 <- rownames(model.imp2)[1:nfeat2]
+# 
+# rf_formula2 <- as.formula(paste("log(salary) ~", paste(model.feat2, collapse = " + ")))
+# model.rf.3 <- randomForest(rf_formula2,
+#                            data = dtrain,
+#                            importance = TRUE)
+# 
+# # Need separate response and explanatory variate data frames
+# trainy <- dtrain[, "salary"]
+# trainx <- select(dtrain, all_of(model.feat2))
+# 
+# # 10 fold cross-validataion
+# model.rfcv3 <- rfcv(trainx = trainx, trainy = log(trainy), cv.fold = 10)
+# # We can plot the results
+# with(model.rfcv3, plot(n.var, error.cv, pch = 19, type="b", col="blue"))
+# 
+# 
+# 
+# # Creating output
+# dtest$salary <- exp(predict(model.rf.3, dtest))
+# 
+# submission <- select(dtest, c(Id, salary))
+# write.csv(submission, "sub_rf.csv",row.names = FALSE) ## THIS IS BAD DON't USE
+# 
+# 
+# # using same features on gradient boosted trees
+# 
+# model.gbm <- gbm(rf_formula2,
+#                          data=dtrain,
+#                          distribution = "gaussian",
+#                          shrinkage = alpha,
+#                          n.trees = M,
+#                          bag.fraction = bag.fraction,
+#                          cv.folds = k,
+#                          interaction.depth = 2
+# )
+# 
+# dtest$salary <- exp(predict(model.gbm, dtest))
+# 
+# submission <- select(dtest, c(Id, salary))
+# write.csv(submission, "sub_gbm_w_rf.csv",row.names = FALSE) ## ALSO PRETTY BAD
+# 
+# # Helper
+# # It will also be handy to have a function that will return the
+# # newdata as a list, since that is what is expected by predict
+# # for that argument.
+# # We will write a function that takes a fitted tree (or any other fit)
+# # THis involves a little formula manipulation ... of interest only ...
+# get.newdata <- function(fittedTree, test.data){
+#   f <- formula(fittedTree)
+#   as.list(test.data[,attr(terms(f), "term.labels")])
+# }
+# #
+# # And a similar function that will extract the response values
+# # This is kind of hairy, formula manipulation ... feel free to ignore ...
+# get.response <- function(fittedTree, test.data){
+#   f <- formula(fittedTree)
+#   terms <- terms(f)
+#   response.id <- attr(terms, "response")
+#   response <- as.list(attr(terms, "variables"))[[response.id + 1]]
+#   with(test.data, eval(response))
+# }
+# get.explanatory_varnames <- function(formula){
+#   f <- as.formula(formula)
+#   terms <- terms(f)
+#   attr(terms, "term.labels")
+# }
+# # The remaining functions are the important ones
+# #
+# getTrees <- function(data, formula, B=100, ...) {
+#   N <- nrow(data)
+#   Trees <- Map(function(i){
+#     getTree(formula,
+#             getSample(data, N),
+#             ...)
+#   },
+#   1:B
+#   )
+#   Trees
+# }
+# # Boosted trees
+# boostTree <- function(formula, data,
+#                       lam=0.01, M = 10,
+#                       control=rpart.control(), ...) {
+#   # Break the formula into pieces
+#   formula.sides <- strsplit(formula, "~")[[1]]
+#   response.string <- formula.sides[1]
+#   rhs.formula <- formula.sides[2]
+#   # Construct the boost formula
+#   bformula <- paste("resid", rhs.formula, sep=" ~ ")
+#   # Initialize the resid and explanatory variates
+#   resid <- get.response(formula, data)
+#   xvars <- get.newdata(formula, data)
+#   # Calculate the boostings
+#   Trees <- Map(
+#     function(i) {
+#       # update data frame with current resid
+#       rdata <- data.frame(resid=resid, xvars)
+#       # Fit the tree
+#       tree <- rpart(bformula, data = rdata, control=control, ...)
+#       # Update the residuals
+#       # (Note the <<- assignment to escape this closure)
+#       resid <<- resid - lam * predict(tree)
+#       # Return the tree
+#       tree }
+#     , 1:M)
+#   # Return the boosted function
+#   function(newdata){
+#     if (missing(newdata)) {
+#       predictions <- Map(function(tree) {
+#         # Boost piece
+#         lam * predict(tree)
+#       }, Trees)
+#     } else {
+#       predictions <- Map(function(tree){
+#         # New data needs to be a list
+#         if (is.data.frame(newdata)) {
+#           newdata.tree <- get.newdata(tree, newdata)
+#         } else {
+#           newdata.tree <- newdata
+#         }
+#         # Boost piece
+#         lam * predict(tree, newdata=newdata.tree)
+#       }, Trees)
+#     }
+#     # Gather the results together
+#     Reduce(`+`, predictions)
+#   }
+# }
+# 
+# boosted_model <- boostTree("salary ~pts + toi + takeaway", 
+#                            data = dtrain, M = 1000, lam = 0.01)
+# dtest$salary <- boosted_model(dtest)
+# 
+# submission <- select(dtest, c(Id, salary))
+# write.csv(submission, "sub_boosted.csv",row.names = FALSE)
+
+# xgboost
+
+set.seed(42)
+train_matrix <- model.matrix(as.formula(formula_full), data = dtrain)[,-1]  # Remove intercept
+train_labels <- log(dtrain$salary)
+
+xgb_dtrain <- xgb.DMatrix(data = train_matrix, label = train_labels)
+
+
+test_matrix <- model.matrix(as.formula(formula_full), data = dtest)[,-1]
+
+# Handle any missing features (set to 0)
+missing_cols <- setdiff(colnames(train_matrix), colnames(test_matrix))
+test_matrix <- cbind(test_matrix, matrix(0, nrow = nrow(test_matrix), 
+                                         ncol = length(missing_cols),
+                                         dimnames = list(NULL, missing_cols)))
+
+# Ensure column order matches training data
+test_matrix <- test_matrix[, colnames(train_matrix)]
+xgb_dtest <- xgb.DMatrix(data = test_matrix)
+
+params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eta = 0.1,
+  max_depth = 6,
+  subsample = 0.8,
+  colsample_bytree = 0.9,
+  gamma = 1
+)
+
+set.seed(42)
+xgb_cv <- xgb.cv(
+  params = params,
+  data = xgb_dtrain,
+  nrounds = 1000,
+  nfold = 10,
+  early_stopping_rounds = 35,
+  print_every_n = 50
+)
+
+# Train model
+xgb_model <- xgb.train(
+  params = params,
+  data = xgb_dtrain,
+  nrounds = xgb_cv$best_iteration
+)
+
+importance_matrix <- xgb.importance(
+  feature_names = colnames(train_matrix),
+  model = xgb_model
+)
+
+xgb.plot.importance(importance_matrix, top_n = 20)
+
+# 4. Predict on test data ------------------------------------------------------
+
+dtest$salary <- exp(predict(xgb_model, test_matrix))
+
+submission <- select(dtest, c(Id, salary))
+write.csv(submission, "sub_xgb.csv",row.names = FALSE)
+
+# Model Comparisons on fit on training data
+# sqrt(mean((log(dtrain$salary) -(predict(gbm.final, dtrain)))^2))
+# sqrt(mean((log(dtrain$salary) -(predict(model.rf.3, dtrain)))^2))
+# sqrt(mean((log(dtrain$salary) -(predict(model.gbm, dtrain)))^2))
+# sqrt(mean((log(dtrain$salary) -(predict(xgb_model, xgb_dtrain)))^2))
+
+#------------------------------------------------------------------------------
+library(caret)
+library(tidyverse)
+library(doParallel)
+
+# xgb_grid <- expand.grid(
+#   nrounds = c(100, 200),
+#   max_depth = c(3, 6, 9),
+#   eta = c(0.01, 0.1, 0.3),
+#   gamma = c(0, 1),
+#   colsample_bytree = c(0.6, 0.8, 1),
+#   min_child_weight = c(1, 3, 5),
+#   subsample = c(0.5, 0.75, 1)
+# )
+# 
+# cluster <- makeCluster(detectCores() - 2)  # Use all cores except one
+# registerDoParallel(cluster)
+# 
+# ctrl <- trainControl(
+#   method = "cv",
+#   number = 5,
+#   allowParallel = TRUE,
+#   verboseIter = TRUE
+# )
+# 
+# 
+# # Convert to caret-compatible format
+# train_df <- as.data.frame(train_matrix) %>%
+#   mutate(label = log(dtrain$salary))
+# 
+# set.seed(42)
+# 
+# cluster <- makeCluster(detectCores() - 3)  # Use all cores except 3
+# registerDoParallel(cluster)
+# 
+# xgb_tuned <- train(
+#   label ~ .,
+#   data = train_df,
+#   method = "xgbTree",
+#   trControl = ctrl,
+#   tuneGrid = xgb_grid,
+#   metric = "RMSE"
+# )
+# 
+# stopCluster(cluster)
+# # Best parameters
+# best_params <- xgb_tuned$bestTune
+# 
+# # Final model training --------------------------------------------------------
+# 
+# 
+# saveRDS(best_params, file="bestparams.RData")
+
+best_params <- readRDS("bestparams.RData")
+
+final_params <- list(
+  objective = "reg:squarederror",
+  eval_metric = "rmse",
+  eta = best_params$eta,
+  max_depth = best_params$max_depth,
+  gamma = best_params$gamma,
+  subsample = best_params$subsample,
+  colsample_bytree = best_params$colsample_bytree,
+  min_child_weight = best_params$min_child_weight,
+  lambda = best_params$min_child_weight
+)
+
+final_model <- xgb.train(
+  params = final_params,
+  data = xgb_dtrain,
+  nrounds = best_params$nrounds
+)
+
+# Evaluate feature importance
+importance_matrix <- xgb.importance(feature_names = colnames(train_matrix), 
+                                    model = final_model)
+xgb.plot.importance(importance_matrix)
+
+dtest$salary <- exp(predict(final_model, xgb_dtest))
+
+submission <- select(dtest, c(Id, salary))
+write.csv(submission, "sub_xgb_final.csv",row.names = FALSE)
+
+sqrt(mean((log(dtrain$salary) -(predict(final_model, xgb_dtrain)))^2))
+#-----------------------------------------------------------------------------
+chosen_features <- importance_matrix[importance_matrix$Importance > 0]$Feature
+
+# Prepare data for XGBoost
+xgb.dtrain <- xgb.DMatrix(data = train_matrix[, chosen_features] , 
+                               label = train_labels)
+xgb.dtest <- xgb.DMatrix(data = test_matrix[, chosen_features])
+
+xgb_select_model <- xgb.train(
+  params = final_params,
+  data = xgb.dtrain,
+  nrounds = best_params$nrounds
+)
+
+dtest$salary <- exp(predict(xgb_select_model, xgb.dtest))
+submission <- select(dtest, c(Id, salary))
+write.csv(submission, "sub_xgb_select.csv",row.names = FALSE)
+
+sqrt(mean((log(dtrain$salary) -(predict(xgb_select_model, xgb.dtrain)))^2))
+
+# ------------------------------------------------------------------------------
+# Further feature engineering
+new_dtrain <- dtrain
+new_dtrain$physicality <- new_dtrain$hits + 0.5*new_dtrain$pim
+new_dtrain$relCorsi_per_toi <- new_dtrain$relCorsi/new_dtrain$toi
+
+new_dtrain$hits <- NULL
+new_dtrain$pim <- NULL
+new_dtrain$relCorsi <- NULL
+
+test_model <- lm(salary~., data = new_dtrain)
+summary(test_model)
+car::vif(test_model)
+
+newer_model <- lm(salary~team+gp+toi+pos+nat+age+injure+
+                    day+is_weekend+month_sin+month_cos+npc+
+                    pm_per_min+ppg+physicality+relCorsi_per_toi, 
+                  data = new_dtrain)
+car::vif(newer_model)
+
+new_formula_full <- "log(salary)~team+toi+gp+pos+nat+age+injure+
+                    day+is_weekend+month_sin+month_cos+npc+
+                    pm_per_min+ppg+physicality+relCorsi_per_toi"
+
+new_dtest <- dtest
+new_dtest$physicality <- new_dtest$hits + 0.5*new_dtest$pim
+new_dtest$relCorsi_per_toi <- new_dtest$relCorsi/new_dtest$toi
+
+new_dtest$hits <- NULL
+new_dtest$pim <- NULL
+new_dtest$relCorsi <- NULL
+
+set.seed(42)
+new_train_matrix <- model.matrix(as.formula(new_formula_full), 
+                                 data = new_dtrain)[,-1]  # Remove intercept
+new_train_labels <- log(new_dtrain$salary)
+
+new_xgb_dtrain <- xgb.DMatrix(data = new_train_matrix, label = new_train_labels)
+
+
+new_test_matrix <- model.matrix(as.formula(new_formula_full), data = new_dtest)[,-1]
+
+# Handle any missing features (set to 0)
+missing_cols <- setdiff(colnames(new_train_matrix), colnames(new_test_matrix))
+new_test_matrix <- cbind(new_test_matrix, matrix(0, nrow = nrow(new_test_matrix), 
+                                         ncol = length(missing_cols),
+                                         dimnames = list(NULL, missing_cols)))
+
+# Ensure column order matches training data
+new_test_matrix <- new_test_matrix[, colnames(new_train_matrix)]
+new_xgb_dtest <- xgb.DMatrix(data = new_test_matrix)
+
+new_xgb_model <- xgb.train(
+  params = final_params,
+  data = new_xgb_dtrain,
+  nrounds = best_params$nrounds
+)
+
+# Evaluate feature importance
+new_importance_matrix <- xgb.importance(feature_names = colnames(new_train_matrix),
+                                    model = new_xgb_model)
+xgb.plot.importance(new_importance_matrix)
+
+dtest$salary <- exp(predict(new_xgb_model, new_xgb_dtest))
+
+submission <- select(dtest, c(Id, salary))
+write.csv(submission, "sub_xgb_new.csv",row.names = FALSE)
+
+sqrt(mean((log(dtrain$salary) -(predict(new_xgb_model, new_xgb_dtrain)))^2))
+
+#-----------------------------------------------------------------------------
+new_chosen_features <- new_importance_matrix[new_importance_matrix$Gain > 0]$Feature
+
+# Prepare data for XGBoost
+new_xgb.dtrain <- xgb.DMatrix(data = new_train_matrix[, new_chosen_features] , 
+                          label = new_train_labels)
+new_xgb.dtest <- xgb.DMatrix(data = new_test_matrix[, new_chosen_features])
+
+new_xgb_select_model <- xgb.train(
+  params = final_params,
+  data = new_xgb.dtrain,
+  nrounds = best_params$nrounds
+)
+
+dtest$salary <- exp(predict(new_xgb_select_model, new_xgb.dtest))
+submission <- select(dtest, c(Id, salary))
+write.csv(submission, "sub_xgb_select_new.csv",row.names = FALSE)
+
+sqrt(mean((log(dtrain$salary) -(predict(xgb_select_model, xgb.dtrain)))^2))
+xgb.plot.importance(importance_matrix = xgb.importance(feature_names = new_chosen_features,
+                                                       model = new_xgb_select_model))
+
+# ------------------------------------------------------------------------------------
+library(caret)
+library(tidyverse)
+library(doParallel)
+
+# final_xgb_grid <- expand.grid(
+#   nrounds = c(50, 100, 150, 200),
+#   max_depth = c(1,2,3,4),
+#   eta = c(0.8, 0.1, 0.15),
+#   gamma = c(0, 0.5),
+#   colsample_bytree = 1,
+#   min_child_weight = c(2, 3, 4),
+#   subsample = 1
+# )
+# 
+# cluster <- makeCluster(detectCores() - 3)  # Use all cores except one
+# registerDoParallel(cluster)
+# 
+# final_ctrl <- trainControl(
+#   method = "cv",
+#   number = 5,
+#   allowParallel = TRUE,
+#   verboseIter = TRUE
+# )
+# 
+# 
+# # Convert to caret-compatible format
+# train_df <- as.data.frame(train_matrix) %>%
+#   mutate(label = log(dtrain$salary))
+# 
+# set.seed(42)
+# new_xgb_tuned <- train(
+#   label ~ .,
+#   data = train_df,
+#   method = "xgbTree",
+#   trControl = final_ctrl,
+#   tuneGrid = final_xgb_grid,
+#   metric = "RMSE"
+# )
+# 
+# stopCluster(cluster)
+# #Best parameters
+# new_best_params <- new_xgb_tuned$bestTune
+
+# saveRDS(new_best_params, file="newbestparams.RData")
+
+new_best_params <- readRDS("newbestparams.RData")
+
+new_final_params <- list(
+  objective = "reg:squarederror",
+  eval_metric = "rmse",
+  eta = new_best_params$eta,
+  max_depth = new_best_params$max_depth,
+  gamma = new_best_params$gamma,
+  subsample = new_best_params$subsample,
+  colsample_bytree = new_best_params$colsample_bytree,
+  min_child_weight = new_best_params$min_child_weight
+)
+
+
+new_xgb_cv <- xgb.cv(
+  params = new_final_params,
+  data = xgb_dtrain,
+  nrounds = 1000,
+  nfold = 10,
+  early_stopping_rounds = 100,
+  print_every_n = 50
+)
+
+
+# Train final model
+xgb_model_final <- xgb.train(
+  params = new_final_params,
+  data = new_xgb.dtrain,
+  nrounds = new_best_params$nrounds
+)
+
+
+dtest$salary <- exp(predict(xgb_model_final, new_xgb.dtest))
+submission <- select(dtest, c(Id, salary))
+write.csv(submission, "sub_xgb_final_new.csv",row.names = FALSE)
+
+
+sqrt(mean((log(dtrain$salary) -(predict(xgb_model_final, new_xgb.dtrain)))^2))
+
+# Evaluate feature importance
+final_importance_matrix <- xgb.importance(model = xgb_model_final)
+xgb.plot.importance(final_importance_matrix)
+
+

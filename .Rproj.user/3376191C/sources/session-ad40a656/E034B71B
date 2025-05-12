@@ -1,0 +1,28 @@
+{
+    "id": "E034B71B",
+    "path": null,
+    "project_path": null,
+    "type": "object_explorer",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1743471346617.0,
+    "source_on_save": false,
+    "relative_order": 15,
+    "properties": {
+        "id": "c806f761a6c14eebb2c702829d5b6b35",
+        "name": "feature_sets",
+        "title": "feature_sets",
+        "language": "R",
+        "source_window_id": "",
+        "Source": "Source"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 732998369319461491,
+    "encoding": "",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1743471346617,
+    "read_only": false,
+    "read_only_alternatives": []
+}
